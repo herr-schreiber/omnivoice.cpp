@@ -24,8 +24,14 @@ services:
 
     # Modelle: Host-Dateien, read-only, exakt dort wo sie liegen
     # (Host: /opt/1080ki/models  ->  Container: /opt/models).
+    # Stimmen: Klon-Voice-Store, read-write (Host: /opt/1080ki/voices
+    # -> Container: /opt/voices). Jeder registrierte Klon wird hier als
+    # <name>.rvq (RVQ-Codes) + <name>.txt (Transkript) gespeichert und beim
+    # Server-Start automatisch wiederhergestellt -- dadurch sind die Stimmen
+    # persistent über Neustarts (früher: nur in RAM, weg bei jedem Restart).
     volumes:
       - /opt/1080ki/models:/opt/models:ro
+      - /opt/1080ki/voices:/opt/voices
 
     # Pascal 1080 Ti = GPU 0. Explizit device_ids, nicht count.
     deploy:
@@ -51,6 +57,8 @@ services:
       - 0.0.0.0
       - --port
       - "8080"
+      - --voices
+      - /opt/voices
 
     # Liveness auf dem /health-Endpoint. start_period großzügig: das
     # Base-Modell (Q8_0) + Tokenizer (F32) dauert beim ersten Load ~30-60 s.
