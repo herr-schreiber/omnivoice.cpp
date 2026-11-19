@@ -17,8 +17,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <dirent.h>
 #include <random>
 #include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unordered_map>
 #include <vector>
 
@@ -40,6 +44,119 @@ struct voice_entry {
 // still reads.
 static std::mutex                                   g_voices_mutex;
 static std::unordered_map<std::string, voice_entry> g_voices;
+
+// Optional on-disk voice store. When --voices <dir> is given, every
+// registered voice is written to <dir>/<name>.rvq (packed RVQ codes) plus
+// <dir>/<name>.txt (the reference transcript), and the directory is replayed
+// at startup so clones survive a server restart. Left unset, the registry is
+// purely in-RAM (the historical behaviour).
+static const char * g_voices_dir = nullptr;
+
+static std::string voice_file_path(const std::string & name, const char * ext) {
+    return std::string(g_voices_dir) + "/" + name + ext;
+}
+
+// Persist one registered voice to disk. The caller holds g_voices_mutex; the
+// entry is read directly from the map (no re-lock).
+static void voices_persist_voice(const std::string & name) {
+    if (!g_voices_dir) {
+        return;
+    }
+    auto it = g_voices.find(name);
+    if (it == g_voices.end()) {
+        return;
+    }
+    const voice_entry & v    = it->second;
+    const int           K    = v.ref.num_codebooks;
+    const size_t        n    = (size_t) K * (size_t) v.ref.ref_T;
+    std::vector<int32_t> codes(v.ref.ref_codes, v.ref.ref_codes + n);
+    if (rvq_write_file(voice_file_path(name, ".rvq").c_str(), codes, RVQ_CODE_BITS)) {
+        FILE * f = fopen(voice_file_path(name, ".txt").c_str(), "wb");
+        if (f) {
+            if (!v.ref_text.empty()) {
+                fwrite(v.ref_text.data(), 1, v.ref_text.size(), f);
+            }
+            fclose(f);
+        }
+        fprintf(stderr, "[Server] voice '%s' persisted to %s\n", name.c_str(), g_voices_dir);
+    } else {
+        fprintf(stderr, "[Server] WARN: failed to persist voice '%s'\n", name.c_str());
+    }
+}
+
+static void voices_forget_file(const std::string & name) {
+    if (!g_voices_dir) {
+        return;
+    }
+    remove(voice_file_path(name, ".rvq").c_str());
+    remove(voice_file_path(name, ".txt").c_str());
+}
+
+// Replay the on-disk store into the registry. Called once at startup, after
+// the codec has loaded (so ov_num_codebooks is valid) and before the server
+// begins serving. A missing/empty directory is not an error.
+static void voices_load(struct ov_context * ov) {
+    if (!g_voices_dir) {
+        return;
+    }
+    DIR * d = opendir(g_voices_dir);
+    if (!d) {
+        return;
+    }
+    const int K          = ov_num_codebooks(ov);
+    struct dirent * e   = nullptr;
+    int loaded          = 0;
+    while ((e = readdir(d)) != nullptr) {
+        const std::string fn = e->d_name;
+        // Match the ".rvq" suffix (4 chars) exactly via a substring compare.
+        if (fn.size() < 4 || fn.substr(fn.size() - 4) != ".rvq") {
+            continue;
+        }
+        const std::string name = fn.substr(0, fn.size() - 4);
+        std::vector<int32_t> codes;
+        int                  ref_T = 0;
+        if (!rvq_read_file(voice_file_path(name, ".rvq").c_str(), K, RVQ_CODE_BITS, codes, &ref_T)) {
+            fprintf(stderr, "[Server] WARN: voice '%s' failed to load, skipping\n", name.c_str());
+            continue;
+        }
+        voice_entry entry;
+        entry.ref      = {};
+        const size_t  bytes = codes.size() * sizeof(int32_t);
+        entry.ref.ref_codes = (int32_t *) malloc(bytes ? bytes : 1);
+        if (!entry.ref.ref_codes) {
+            fprintf(stderr, "[Server] WARN: voice '%s' OOM, skipping\n", name.c_str());
+            continue;
+        }
+        std::memcpy(entry.ref.ref_codes, codes.data(), bytes);
+        entry.ref.ref_T         = ref_T;
+        entry.ref.num_codebooks = K;
+        {
+            FILE * tf = fopen(voice_file_path(name, ".txt").c_str(), "rb");
+            if (tf) {
+                char     buf[8192];
+                size_t   r;
+                std::string tx;
+                while ((r = fread(buf, 1, sizeof buf, tf)) > 0) {
+                    tx.append(buf, r);
+                }
+                fclose(tf);
+                entry.ref_text = tx;
+            }
+        }
+        std::lock_guard<std::mutex> lock(g_voices_mutex);
+        auto                        it = g_voices.find(name);
+        if (it != g_voices.end()) {
+            ov_voice_ref_free(&it->second.ref);
+        }
+        g_voices[name] = std::move(entry);
+        fprintf(stderr, "[Server] loaded voice '%s' (K=%d T=%d)\n", name.c_str(), K, ref_T);
+        loaded++;
+    }
+    closedir(d);
+    if (loaded) {
+        fprintf(stderr, "[Server] %d voice(s) restored from %s\n", loaded, g_voices_dir);
+    }
+}
 
 static void print_usage(const char * prog) {
     fprintf(stderr, "omnivoice.cpp %s\n\n", OMNIVOICE_VERSION);
@@ -74,6 +191,7 @@ int main(int argc, char ** argv) {
     server_config cfg;
     bool          use_fa     = true;
     bool          clamp_fp16 = false;
+    const char *  voices_dir = nullptr;
 
     for (int i = 1; i < argc; i++) {
         const char * arg = argv[i];
@@ -93,6 +211,8 @@ int main(int argc, char ** argv) {
             use_fa = false;
         } else if (!std::strcmp(arg, "--clamp-fp16")) {
             clamp_fp16 = true;
+        } else if (!std::strcmp(arg, "--voices") && i + 1 < argc) {
+            voices_dir = argv[++i];
         } else {
             print_usage(argv[0]);
             return 1;
@@ -106,6 +226,9 @@ int main(int argc, char ** argv) {
     if (device && !backend_check_device(device)) {
         print_usage(argv[0]);
         return 1;
+    }
+    if (voices_dir) {
+        g_voices_dir = voices_dir;
     }
 
     struct ov_init_params iparams;
@@ -121,6 +244,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Server] FATAL: %s\n", ov_last_error());
         return 1;
     }
+    // Restore any persisted voices before the server starts serving.
+    voices_load(ov);
 
     tts_backend be;
     be.model_id = basename_of(model_path);
@@ -179,6 +304,10 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Server] voice '%s' registered (K=%d T=%d)\n", up.name.c_str(), entry.ref.num_codebooks,
                 entry.ref.ref_T);
         g_voices.emplace(up.name, std::move(entry));
+        // Persist the freshly registered voice to the on-disk store (no-op when
+        // --voices is not set). The map is already updated and the caller holds
+        // g_voices_mutex, so the helper can read the entry directly.
+        voices_persist_voice(up.name);
         return true;
     };
 
@@ -190,6 +319,8 @@ int main(int argc, char ** argv) {
         }
         ov_voice_ref_free(&it->second.ref);
         g_voices.erase(it);
+        // Drop the on-disk copy too (no-op when --voices is not set).
+        voices_forget_file(name);
         return true;
     };
 
