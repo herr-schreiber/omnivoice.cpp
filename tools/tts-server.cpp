@@ -108,10 +108,11 @@ static void voices_load(struct ov_context * ov) {
     int loaded          = 0;
     while ((e = readdir(d)) != nullptr) {
         const std::string fn = e->d_name;
-        if (fn.size() < 5 || fn.compare(fn.size() - 5, 5, ".rvq") != 0) {
+        // Match the ".rvq" suffix (4 chars) exactly via a substring compare.
+        if (fn.size() < 4 || fn.substr(fn.size() - 4) != ".rvq") {
             continue;
         }
-        const std::string name = fn.substr(0, fn.size() - 5);
+        const std::string name = fn.substr(0, fn.size() - 4);
         std::vector<int32_t> codes;
         int                  ref_T = 0;
         if (!rvq_read_file(voice_file_path(name, ".rvq").c_str(), K, RVQ_CODE_BITS, codes, &ref_T)) {
