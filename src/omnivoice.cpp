@@ -192,7 +192,7 @@ void ov_tts_default_params(struct ov_tts_params * p) {
     p->chunk_threshold_sec     = 30.0f;
     p->denoise                 = true;
     p->preprocess_prompt       = true;
-    p->mg_num_step             = 32;
+    p->mg_num_step             = 24;
     p->mg_guidance_scale       = 2.0f;
     p->mg_t_shift              = 0.1f;
     p->mg_layer_penalty_factor = 5.0f;
