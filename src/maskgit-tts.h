@@ -21,7 +21,7 @@
 #include <vector>
 
 struct MaskgitConfig {
-    int      num_step             = 32;
+    int      num_step             = 24;
     float    guidance_scale       = 2.0f;
     float    t_shift              = 0.1f;
     float    layer_penalty_factor = 5.0f;
