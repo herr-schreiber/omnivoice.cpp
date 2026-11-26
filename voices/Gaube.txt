@@ -1,0 +1,1 @@
+A conference is even better when there are talks about trains, so here you go, the Dinox 17 train talk, you can just model a train in netbox about architecting and running modern train infrastructure, IT infrastructure in trains.
