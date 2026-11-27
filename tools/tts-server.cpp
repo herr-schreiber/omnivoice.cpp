@@ -25,6 +25,8 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
+#include <fstream>
 
 // Packed .rvq code width, fixed by the OmniVoice codec (2048 entries per
 // codebook).
@@ -172,7 +174,8 @@ static void print_usage(const char * prog) {
             "  --port <n>              Listen port (default: 8080)\n"
             "  --lang <str>            Language label when a request omits one (default 'None')\n"
             "  --no-fa                 Disable flash attention\n"
-            "  --clamp-fp16            Clamp hidden states to FP16 range\n",
+            "  --clamp-fp16            Clamp hidden states to FP16 range\n"
+            "  --voices <dir>          Auto-load .rvq voice files from this directory at startup\n"
             prog);
 }
 
